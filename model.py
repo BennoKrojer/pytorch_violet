@@ -11,7 +11,7 @@ class EncImg(T.nn.Module):
         
         self.emb_cls = T.nn.Parameter(0.02*T.randn(1, 1, 1, 768))
         self.emb_pos = T.nn.Parameter(0.02*T.randn(1, 1, 1+14**2, 768))
-        self.emb_len = T.nn.Parameter(0.02*T.randn(1, 6, 1, 768))
+        self.emb_len = T.nn.Parameter(0.02*T.randn(1, 10, 1, 768))
         self.norm = T.nn.LayerNorm(768)
     
     def forward(self, img):

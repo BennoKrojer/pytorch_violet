@@ -8,8 +8,8 @@ class Dataset_Base(T.utils.data.Dataset):
         self.args = args
         self.tokzr = transformers.BertTokenizerFast.from_pretrained('bert-base-uncased')
     
-    def str2img(self, b):
-        img = Image.open(io.BytesIO(base64.b64decode(b))).convert('RGB')
+    def transfom_img(self, img):
+        img = img.convert('RGB')
         w, h = img.size
         img = TV.transforms.Compose([TV.transforms.Pad([0, (w-h)//2] if w>h else [(h-w)//2, 0]), 
                                      TV.transforms.Resize([self.args['size_img'], self.args['size_img']]), 
