@@ -54,14 +54,28 @@ class VIOLET_Base(T.nn.Module):
         self.mask_ext, self.trsfr = bert.get_extended_attention_mask, bert.bert.encoder
     
     def go_feat(self, img, txt, mask):
-        feat_img, mask_img = self.enc_img(img)
-        feat_txt, mask_txt = self.enc_txt(txt), mask
+        if self.freeze_vision:
+            with T.no_grad():
+                feat_img, mask_img = self.enc_img(img)
+        else:
+            feat_img, mask_img = self.enc_img(img)
+
+        if self.freeze_lang:
+            with T.no_grad():
+                feat_txt, mask_txt = self.enc_txt(txt), mask
+        else:
+            feat_txt, mask_txt = self.enc_txt(txt), mask
+
         return feat_img, mask_img, feat_txt, mask_txt
     
     def go_cross(self, feat_img, mask_img, feat_txt, mask_txt):
         feat, mask = T.cat([feat_img, feat_txt], dim=1), T.cat([mask_img, mask_txt], dim=1)
         mask = self.mask_ext(mask, mask.shape, mask.device)
-        out = self.trsfr(feat, mask, output_attentions=True)
+        if self.freeze_cross:
+            with T.no_grad():
+                out = self.trsfr(feat, mask, output_attentions=True)
+        else:
+            out = self.trsfr(feat, mask, output_attentions=True)
         return out['last_hidden_state'], out['attentions']
     
     def load_ckpt(self, ckpt):
