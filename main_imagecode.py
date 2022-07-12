@@ -8,24 +8,31 @@ import wandb
 import argparse
 
 def load_data(train=True, video_only=False):
-    def format_data(json_file):
+
+    
+
+    def format_data(json_file, cache_file):
         dataset = []
         for img_dir, data in json_file.items():
             img_files = list((Path('/network/scratch/b/benno.krojer/dataset/games') / img_dir).glob("*.jpg"))
             img_files = sorted(img_files, key=lambda x: int(str(x).split('/')[-1].split('.')[0][3:]))
             for img_idx, text in data.items():
                 static = 'open_images' in img_dir
+                txt_cls = cache_file['txt'][f'{img_dir}_[{img_idx}]']
+                img_cls = cache_file['img'][img_dir]
                 if video_only:
                     if not static:
-                        dataset.append((img_dir, img_files, int(img_idx), text))
+                        dataset.append((img_dir, img_files, int(img_idx), text, txt_cls, img_cls))
                 else:
-                    dataset.append((img_dir, img_files, int(img_idx), text))
+                    dataset.append((img_dir, img_files, int(img_idx), text, txt_cls, img_cls))
         return dataset
     if train:
         data = json.load(open('../imagecode/data/train_data.json', 'r'))
+        cached_clip = pickle.load(open('/network/scratch/b/benno.krojer/dataset/clip_cls_train.pkl', 'rb'))
     else:
         data = json.load(open('../imagecode/data/valid_data.json', 'r'))
-    data = format_data(data)
+        cached_clip = pickle.load(open('/network/scratch/b/benno.krojer/dataset/clip_cls_valid.pkl', 'rb'))
+    data = format_data(data, cached_clip)
     return data
 
 def load_data_debug(train=True, video_only=False):
@@ -60,14 +67,14 @@ class Dataset_Retrieval(Dataset_Base):
         return len(self.data)
     
     def __getitem__(self, idx):
-        img_dir, img_files, img_idx, text = self.data[idx]
+        img_dir, img_files, img_idx, text, txt_cls, img_cls = self.data[idx]
         
         images = [self.transfom_img(Image.open(photo_file)) for photo_file in img_files]
         img = T.cat(images, dim=0)
         
         self.txt, mask = self.str2txt(text)
         
-        return img, self.txt, img_idx, mask
+        return img, self.txt, img_idx, mask, txt_cls, img_cls
 
 class VIOLET_Retrieval(VIOLET_Base):
     def __init__(self, args):
@@ -86,13 +93,14 @@ class VIOLET_Retrieval(VIOLET_Base):
         self.freeze_vision = args.freeze_vision
         self.freeze_cross = args.freeze_cross
         self.avgpool = T.nn.AdaptiveAvgPool1d(1)
+        self.args = args
     
-    def forward(self, img, txt, mask):
+    def forward(self, img, txt, mask, txt_cls, img_cls):
         img = img.reshape((img.shape[0], 10, 3, img.shape[-2], img.shape[-1]))  
         (_B, _T, _, _H, _W), (_, _X) = img.shape, txt.shape
         _h, _w = _H//32, _W//32
         
-        feat_img, mask_img, feat_txt, mask_txt = self.go_feat(img, txt, mask) #B,10,3,H,W -> B,10,250,768
+        feat_img, mask_img, feat_txt, mask_txt = self.go_feat(img, txt, mask, txt_cls, img_cls) #B,10,3,H,W -> B,10,250,768
 
         out, _ = self.go_cross(feat_img, mask_img, feat_txt, mask_txt)
         if args.aggregation == 'lang_CLS':
@@ -121,10 +129,10 @@ class Agent_Retrieval(Agent_Base):
         super().__init__(args, model)
         self.len_dl = 0
     
-    def step(self, step, img, txt, img_idx, mask, is_train):
+    def step(self, step, img, txt, img_idx, mask, txt_cls, img_cls, is_train):
         self.optzr.zero_grad()
         with T.cuda.amp.autocast():
-            out = self.model(img.cuda(), txt.cuda(), mask.cuda())
+            out = self.model(img.cuda(), txt.cuda(), mask.cuda(), txt_cls, img_cls)
             ls = self.loss_func(out, img_idx.cuda())
         if is_train==True:
             self.scaler.scale(ls).backward()
@@ -141,8 +149,8 @@ class Agent_Retrieval(Agent_Base):
         self.len_dl = len(dl)
         ret = []
         i = 0
-        for img, txt, img_idx, mask in tqdm(dl, ascii=True):
-            ret.append(self.step(i, img, txt, img_idx, mask, is_train))
+        for img, txt, img_idx, txt_cls, img_cls, mask in tqdm(dl, ascii=True):
+            ret.append(self.step(i, img, txt, img_idx, mask, txt_cls, img_cls, is_train))
             i += 1
         ret = float(np.average(ret))
         
@@ -164,9 +172,10 @@ if __name__=='__main__':
     parser.add_argument('--activation', type=str)
     parser.add_argument('--ckpt_path', default="./_data/ckpt_violet_pretrain.pt")
     parser.add_argument('--epochs', default=40)
-    parser.add_argument('--aggregation', choices=['mean_pooling_features', 'mean_pooling_patches'])
+    parser.add_argument('--aggregation', choices=['vision_CLS', 'mean_pooling_features', 'mean_pooling_patches'])
+    parser.add_argument('--use_clip_txt_cls', type=str)
     parser.add_argument('--grad_accumulation', default=1)
-    parser.add_argument('--max_length')
+    parser.add_argument('--max_length', type=int)
     parser.add_argument("--job_id")
 
     args = parser.parse_args()
@@ -174,6 +183,7 @@ if __name__=='__main__':
     args.freeze_vision = args.freeze_vision == 'True'
     args.freeze_cross = args.freeze_cross == 'True'
     args.video_only = args.video_only == 'True'
+    args.use_clip_txt_cls = args.use_clip_txt_cls == 'True'
     args.grad_accumulation = args.batchsize // 4
     args.batchsize = 4
     
@@ -187,7 +197,7 @@ if __name__=='__main__':
     
     dl_tr, dl_vl = [T.utils.data.DataLoader(Dataset_Retrieval(args, split), 
                                                    batch_size=args.batchsize, shuffle=(split=='train'), 
-                                                   num_workers=32, pin_memory=True)\
+                                                   num_workers=32, pin_memory=True, multiprocessing_context='spawn')\
                            for split in ['train', 'val']]
     
     log = {'ls_tr': [], 'ac_vl': [], 'ac_ts': []}
