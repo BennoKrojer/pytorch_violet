@@ -25,7 +25,7 @@ class EncImg(T.nn.Module):
         
         f_img = f_img.permute(0, 1, 3, 4, 2).view([_B, _T, _h*_w, 768])
         if img_cls is not None:
-          f_img = T.cat([img_cls.expand([_B, -1, -1, -1]), f_img], dim=2)
+          f_img = T.cat([img_cls.permute(0,2,1,3), f_img], dim=2)
         else:
             f_img = T.cat([self.emb_cls.expand([_B, _T, -1, -1]), f_img], dim=2)
         f_img += self.emb_pos.expand([_B, _T, -1, -1])[:, :, :1+_h*_w, :]+self.emb_len.expand([_B, -1, 1+_h*_w, -1])[:, :_T, :, :]
@@ -46,7 +46,7 @@ class EncTxt(T.nn.Module):
     def forward(self, txt, txt_cls):
         f_txt = self.emb_txt(txt)
         if txt_cls is not None:
-            f_txt = T.cat([txt_cls, f_txt], dim=1)
+            f_txt = T.cat([txt_cls.squeeze(1), f_txt], dim=1)
         return f_txt
 
 class VIOLET_Base(T.nn.Module):
@@ -59,7 +59,8 @@ class VIOLET_Base(T.nn.Module):
     
     def go_feat(self, img, txt, mask, txt_cls, img_cls):
         txt_cls = txt_cls if self.args.use_clip_txt_cls else None
-        img_cls = img_cls if self.args.aggregation == 'vision_CLS' else None
+        mask = T.cat([T.ones((mask.shape[0],1)).cuda(), mask], dim=1) if self.args.use_clip_txt_cls else mask
+        # img_cls = img_cls if self.args.aggregation == 'vision_CLS' else None
         if self.freeze_vision:
             with T.no_grad():
                 feat_img, mask_img = self.enc_img(img, img_cls)
