@@ -16,7 +16,7 @@ def load_data(train=True, video_only=False):
             img_files = list((Path('/network/scratch/b/benno.krojer/dataset/games') / img_dir).glob("*.jpg"))
             img_files = sorted(img_files, key=lambda x: int(str(x).split('/')[-1].split('.')[0][3:]))
             for img_idx, text in data.items():
-                static = 'open_images' in img_dir
+                static = 'open-images' in img_dir
                 txt_cls = cache_file['txt'][f'{img_dir}_[{img_idx}]']
                 img_cls = cache_file['img'][img_dir]
                 if video_only:
@@ -79,8 +79,9 @@ class Dataset_Retrieval(Dataset_Base):
         img = T.cat(images, dim=0)
         
         self.txt, mask = self.str2txt(text)
+        is_video = T.tensor(1 if 'open-images' not in img_dir else 0)
         
-        return img, self.txt, img_idx, txt_cls, img_cls, mask
+        return img, self.txt, img_idx, txt_cls, img_cls, mask, is_video
 
 class VIOLET_Retrieval(VIOLET_Base):
     def __init__(self, args):
@@ -115,14 +116,6 @@ class VIOLET_Retrieval(VIOLET_Base):
         feat_img, mask_img, feat_txt, mask_txt = self.go_feat(img, txt, mask, txt_cls, img_cls) #B,10,3,H,W -> B,10,250,768
 
         out, _ = self.go_cross(feat_img, mask_img, feat_txt, mask_txt)
-        # if args.aggregation == 'lang_CLS':
-        #     out = self.fc(out[:, (1+_h*_w)*_T, :]) / 0.05
-        # elif args.aggregation == 'mean_pooling_features':
-        #     out = out[:, :(1+_h*_w)*_T, :]
-        #     out = out.reshape(_B*10, (1+_h*_w), -1)
-        #     out = self.avgpool(out).squeeze()
-        #     out = self.fc(out)
-        #     out = out.reshape(_B, 10)
         if args.aggregation == 'mean_pooling_patches':
             out = out[:, :(1+_h*_w)*_T, :]
             out = out.reshape(_B*10, (1+_h*_w), -1)
@@ -145,7 +138,7 @@ class Agent_Retrieval(Agent_Base):
         super().__init__(args, model)
         self.len_dl = 0
     
-    def step(self, step, img, txt, img_idx, mask, txt_cls, img_cls, is_train):
+    def step(self, step, img, txt, img_idx, mask, txt_cls, img_cls, is_video, is_train):
         self.optzr.zero_grad()
         with T.cuda.amp.autocast():
             out = self.model(img.cuda(), txt.cuda(), mask.cuda(), txt_cls, img_cls)
@@ -159,14 +152,22 @@ class Agent_Retrieval(Agent_Base):
         else:
             out = T.argmax(out, dim=1)
             ac = (out==img_idx.cuda()).float().mean().item()
+            is_static = 1 - is_video
+            is_video = is_video.cuda()
+            is_static = is_static.cuda()
+            total_video = T.sum(is_video)
+            total_static = T.sum(is_static)
+            ac_video = (out==img_idx.cuda() * is_video).float().sum().item() / total_video
+            ac_static = (out==img_idx.cuda() * is_static).float().sum().item() / total_static
+            ac = (ac, ac_video, ac_static)
             return ac
     
     def go_dl(self, dl, is_train):
         self.len_dl = len(dl)
         ret = []
         i = 0
-        for img, txt, img_idx, txt_cls, img_cls, mask in tqdm(dl, ascii=True):
-            ret.append(self.step(i, img, txt, img_idx, mask, txt_cls, img_cls, is_train))
+        for img, txt, img_idx, txt_cls, img_cls, mask, img_dir in tqdm(dl, ascii=True):
+            ret.append(self.step(i, img, txt, img_idx, mask, txt_cls, img_cls, img_dir, is_train))
             i += 1
         ret = float(np.average(ret))
         
