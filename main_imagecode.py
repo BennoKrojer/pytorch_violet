@@ -1,4 +1,6 @@
 
+import enum
+from operator import is_
 from pathlib import Path
 from re import S
 from lib import *
@@ -46,7 +48,7 @@ def load_data_debug(train=True, video_only=False):
                 txt_cls = cache_file['txt'][f'{img_dir}_[{img_idx}]']
                 img_cls = cache_file['img'][img_dir]
                 if True:
-                    if not static and i < 100:
+                    if not static and i < 10:
                         dataset.append((img_dir, img_files, int(img_idx), text, txt_cls, img_cls))
                         i += 1
                 else:
@@ -151,25 +153,30 @@ class Agent_Retrieval(Agent_Base):
             return ls.item()
         else:
             out = T.argmax(out, dim=1)
-            ac = (out==img_idx.cuda()).float().mean().item()
-            is_static = 1 - is_video
-            is_video = is_video.cuda()
-            is_static = is_static.cuda()
-            total_video = T.sum(is_video)
-            total_static = T.sum(is_static)
-            ac_video = (out==img_idx.cuda() * is_video).float().sum().item() / total_video
-            ac_static = (out==img_idx.cuda() * is_static).float().sum().item() / total_static
-            ac = (ac, ac_video, ac_static)
-            return ac
+            ac = 0
+            ac_vid = 0
+            ac_static = 0
+            for i, idx in enumerate(img_idx):
+                if idx.item() == out[i].item():
+                    ac += 1
+                    if is_video[i]:
+                        ac_vid += 1
+                    else:
+                        ac_static += 1
+            return [ac / img_idx.shape[0], ac_vid, is_video.sum().item(), ac_static, (1-is_video).sum().item()]
     
     def go_dl(self, dl, is_train):
         self.len_dl = len(dl)
         ret = []
         i = 0
-        for img, txt, img_idx, txt_cls, img_cls, mask, img_dir in tqdm(dl, ascii=True):
-            ret.append(self.step(i, img, txt, img_idx, mask, txt_cls, img_cls, img_dir, is_train))
+        for img, txt, img_idx, txt_cls, img_cls, mask, is_video in tqdm(dl, ascii=True):
+            ret.append(self.step(i, img, txt, img_idx, mask, txt_cls, img_cls, is_video, is_train))
             i += 1
-        ret = float(np.average(ret))
+        if is_train:
+            float(np.average(ret))
+        else:
+            ret = list(zip(*ret))
+            ret = (float(np.average(ret[0])), float(np.sum(ret[1])) / float(np.sum(ret[2])), float(np.sum(ret[3])) / float(np.sum(ret[4])))
         
         return ret
     
@@ -207,7 +214,7 @@ if __name__=='__main__':
     args.grad_accumulation = args.batchsize // 2
     args.batchsize = 2
     
-    wandb.init(project='violet', settings=wandb.Settings(start_method="fork"))
+    wandb.init(project='violet_debug', settings=wandb.Settings(start_method="fork"))
     wandb.config.update(args)
 
     args.batchsize = args.batchsize*T.cuda.device_count()
@@ -229,13 +236,19 @@ if __name__=='__main__':
         T.save(model.module.state_dict(), '%s/ckpt_violet_%s_0.pt'%(path_output, args['task']))
     
     agent = Agent_Retrieval(args, model)
+    best_val = 0
     for e in tqdm(range(args.epochs), ascii=True):
         model.train()
         ls_tr = agent.go_dl(dl_tr, True)
         wandb.log({'Loss': ls_tr})
         model.eval()
-        ac_vl = agent.go_dl(dl_vl, False)
+        ac_vl, ac_video, ac_static = agent.go_dl(dl_vl, False)
+        if ac_vl > best_val:
+            best_val = ac_vl
         wandb.log({'Validation Accuracy': ac_vl})
+        wandb.log({'Video Validation Accuracy': ac_video})
+        wandb.log({'Static Validation Accuracy': ac_static})
+        wandb.log({'Best Validation Accuracy': best_val})
         
         log['ls_tr'].append(ls_tr), log['ac_vl'].append(ac_vl)
         json.dump(log, open('%s/log.json'%(path_output), 'w'), indent=2)
