@@ -44,11 +44,11 @@ def load_data_debug(train=True, video_only=False):
             img_files = list((Path('/network/scratch/b/benno.krojer/dataset/games') / img_dir).glob("*.jpg"))
             img_files = sorted(img_files, key=lambda x: int(str(x).split('/')[-1].split('.')[0][3:]))
             for img_idx, text in data.items():
-                static = 'open_images' in img_dir
+                static = 'open-images' in img_dir
                 txt_cls = cache_file['txt'][f'{img_dir}_[{img_idx}]']
                 img_cls = cache_file['img'][img_dir]
                 if True:
-                    if not static and i < 10:
+                    if not static and i < 9:
                         dataset.append((img_dir, img_files, int(img_idx), text, txt_cls, img_cls))
                         i += 1
                 else:
@@ -144,6 +144,8 @@ class Agent_Retrieval(Agent_Base):
         self.optzr.zero_grad()
         with T.cuda.amp.autocast():
             out = self.model(img.cuda(), txt.cuda(), mask.cuda(), txt_cls, img_cls)
+            if len(out.shape) == 1:
+                out = out.unsqueeze(0)
             ls = self.loss_func(out, img_idx.cuda())
         if is_train==True:
             self.scaler.scale(ls).backward()
@@ -173,10 +175,10 @@ class Agent_Retrieval(Agent_Base):
             ret.append(self.step(i, img, txt, img_idx, mask, txt_cls, img_cls, is_video, is_train))
             i += 1
         if is_train:
-            float(np.average(ret))
+            ret = float(np.average(ret))
         else:
             ret = list(zip(*ret))
-            ret = (float(np.average(ret[0])), float(np.sum(ret[1])) / float(np.sum(ret[2])), float(np.sum(ret[3])) / float(np.sum(ret[4])))
+            ret = (float(np.average(ret[0])), float(np.sum(ret[1])) / float(np.sum(ret[2])), (float(np.sum(ret[3])) / float(np.sum(ret[4]))) if float(np.sum(ret[4])) > 0 else 0)
         
         return ret
     
@@ -214,7 +216,11 @@ if __name__=='__main__':
     args.grad_accumulation = args.batchsize // 2
     args.batchsize = 2
     
-    wandb.init(project='violet_debug', settings=wandb.Settings(start_method="fork"))
+    if args.debug:
+        name = 'violet_debug'
+    else:
+        name = 'violet_clip'
+    wandb.init(project=name, settings=wandb.Settings(start_method="fork"))
     wandb.config.update(args)
 
     args.batchsize = args.batchsize*T.cuda.device_count()
